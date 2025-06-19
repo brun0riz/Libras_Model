@@ -1,67 +1,123 @@
-import pandas as pd
+import os
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score
 import pickle
-import numpy as np
+import kerastuner as kt
 
-# --- CARREGAMENTO E PREPARAÇÃO DOS DADOS ---
-NOME_ARQUIVO_DADOS = 'libras_dataset.csv'
-df = pd.read_csv(NOME_ARQUIVO_DADOS)
+def load_sequential_data(data_path):
+    """
+    Carrega os dados sequenciais salvos em arquivos .npy.
+    Espera uma estrutura de pastas: data_path/action_name/sequence_num.npy
+    """
+    sequences, labels = [], [] # Lista para armazenar os gestos e rótulos
+    actions = [action for action in os.listdir(data_path) if not action.startswith('.')]
+    
+    label_map = {label: num for num, label in enumerate(actions)} # Mapeia ações para números
 
-# X são as coordenadas (features), y são as letras (labels)
-X = df.drop('letra', axis=1).values
-y = df['letra'].values
+    print("Carregando dados...")
+    for action in actions:
+        action_path = os.path.join(data_path, action)
+        sequence_files = os.listdir(action_path)
+        for seq_file in sequence_files:
+            res = np.load(os.path.join(action_path, seq_file))
+            sequences.append(res)
+            labels.append(label_map[action])
+    
+    print(f"Dados carregados. Total de {len(sequences)} sequências.")
+    return np.array(sequences), np.array(labels), actions
 
-# --- TRANSFORMAÇÃO DOS RÓTULOS (CRUCIAL PARA REDES NEURAIS) ---
-# 1. Converter rótulos de texto ('A', 'B', ..) para números (0, 1, ..)
+# --- 2. CARREGAMENTO E PREPARAÇÃO DOS DADOS ---
+DATA_PATH = "Libras_Data"
+X, y, actions = load_sequential_data(DATA_PATH)
+
+# Codificar os rótulos (letras) para números (embora já tenhamos feito, o encoder é útil)
 encoder = LabelEncoder()
-y_encoded = encoder.fit_transform(y)
-
-# 2. Converter os rótulos numéricos para o formato "one-hot"
-# Ex: 'A' -> 0 -> [1, 0, 0, ..., 0]
-# Ex: 'B' -> 1 -> [0, 1, 0, ..., 0]
-y_categorical = tf.keras.utils.to_categorical(y_encoded)
+y_encoded = encoder.fit_transform([actions[i] for i in y])
 
 # Salvar o encoder para usá-lo depois na predição
 with open('label_encoder.pkl', 'wb') as f:
     pickle.dump(encoder, f)
 print("LabelEncoder salvo em 'label_encoder.pkl'")
 
-# Dividir os dados em conjuntos de treinamento e teste
+y_categorical = tf.keras.utils.to_categorical(y_encoded)
+
+# Dividir os dados em treino e teste para a busca de hiperparâmetros
 X_train, X_test, y_train, y_test = train_test_split(X, y_categorical, test_size=0.2, random_state=42, stratify=y_categorical)
 
-# --- CONSTRUÇÃO DO MODELO DA REDE NEURAL ---
-model = keras.Sequential([
-    # Camada de entrada: o input_shape deve ser o número de colunas em X
-    keras.layers.Dense(128, activation='relu', input_shape=(X_train.shape[1],)),
-    keras.layers.Dropout(0.5), # Dropout ajuda a previnir overfitting
-    keras.layers.Dense(64, activation='relu'),
-    keras.layers.Dropout(0.5),
-    # Camada de saída: o número de neurônios deve ser o número de letras (classes)
-    # A ativação 'softmax' é usada para classificação multiclasse
-    keras.layers.Dense(y_categorical.shape[1], activation='softmax')
-])
+# --- 3. FUNÇÃO PARA CRIAR O HIPERMODELO (LSTM) ---
+def build_model(hp):
+    """
+    Constrói um modelo LSTM que o Keras Tuner pode otimizar.
+    """
+    model = keras.Sequential()
+    
+    # Camada LSTM com número de unidades a ser otimizado
+    model.add(keras.layers.LSTM(
+        units=hp.Int('units_lstm', min_value=32, max_value=128, step=32),
+        return_sequences=True, # Importante quando há LSTMs empilhadas
+        input_shape=(X_train.shape[1], X_train.shape[2])
+    ))
+    model.add(keras.layers.Dropout(hp.Float('dropout_1', min_value=0.2, max_value=0.5, step=0.1)))
 
-# Compilar o modelo
-model.compile(optimizer='adam',
-              loss='categorical_crossentropy', # Loss function para este tipo de problema
-              metrics=['accuracy'])
+    model.add(keras.layers.LSTM(
+        units=hp.Int('units_lstm_2', min_value=32, max_value=128, step=32),
+        return_sequences=False # A última camada LSTM não retorna sequência
+    ))
+    model.add(keras.layers.Dropout(hp.Float('dropout_2', min_value=0.2, max_value=0.5, step=0.1)))
+    
+    # Camada Densa de saída
+    model.add(keras.layers.Dense(y_train.shape[1], activation='softmax'))
 
-print("\n--- Resumo do Modelo ---")
-model.summary()
+    # Compilação do modelo
+    model.compile(
+        optimizer=keras.optimizers.Adam(hp.Choice('learning_rate', values=[1e-2, 1e-3, 1e-4])),
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    return model
 
-# --- TREINAMENTO DO MODELO ---
-print("\nIniciando o treinamento da Rede Neural...")
-history = model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test), verbose=1)
-print("Treinamento concluído!")
+# --- 4. BUSCA DE HIPERPARÂMETROS COM KERAS TUNER ---
+print("\nIniciando a busca por hiperparâmetros...")
 
-# --- AVALIAÇÃO E SALVAMENTO ---
-loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
-print(f"\nAcurácia do modelo no conjunto de teste: {accuracy * 100:.2f}%")
+# Usaremos o Hyperband, um algoritmo de busca eficiente
+tuner = kt.Hyperband(
+    build_model,
+    objective='val_accuracy',
+    max_epochs=30, # Máximo de épocas para os melhores modelos
+    factor=3,
+    directory='keras_tuner_dir',
+    project_name='libras_lstm'
+)
 
-# Salvar o modelo treinado no formato do Keras
-model.save('libras_model_nn.h5')
-print("Modelo da Rede Neural salvo com sucesso em 'libras_model_nn.h5'")
+# Callbacks para parar o treino mais cedo se não houver melhora
+stop_early = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)
+
+tuner.search(X_train, y_train, epochs=50, validation_data=(X_test, y_test), callbacks=[stop_early])
+
+# Pega os melhores hiperparâmetros
+best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+
+print("\n--- Melhores Hiperparâmetros Encontrados ---")
+print(f"Unidades LSTM (camada 1): {best_hps.get('units_lstm')}")
+print(f"Dropout (camada 1): {best_hps.get('dropout_1'):.2f}")
+print(f"Unidades LSTM (camada 2): {best_hps.get('units_lstm_2')}")
+print(f"Dropout (camada 2): {best_hps.get('dropout_2'):.2f}")
+print(f"Taxa de Aprendizagem: {best_hps.get('learning_rate')}")
+print("-" * 50)
+
+
+# --- 5. TREINAMENTO FINAL COM OS MELHORES HIPERPARÂMETROS ---
+print("\n--- Treinamento Final com Todos os Dados e Melhores Parâmetros ---")
+
+# Constrói o modelo com os melhores hiperparâmetros encontrados
+final_model = tuner.hypermodel.build(best_hps)
+
+# Treina o modelo final com todos os dados
+history = final_model.fit(X, y_categorical, epochs=100, batch_size=32, validation_split=0.1, callbacks=[stop_early])
+
+# Salva o modelo final
+final_model.save('libras_model_lstm_tuned.h5')
+print("\nModelo final salvo com sucesso em 'libras_model_lstm_tuned.h5'")
