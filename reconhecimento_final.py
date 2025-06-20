@@ -3,17 +3,20 @@ import mediapipe as mp
 from tensorflow.keras.models import load_model
 import pickle
 import numpy as np
+from collections import deque
 
 # --- PARÂMETROS E CONFIGURAÇÕES ---
 MODEL_PATH = 'libras_model_lstm_final.h5'
 ENCODER_PATH = 'label_encoder.pkl'
 
-# Confiança mínima para uma predição ser considerada válida
-CONFIDENCE_THRESHOLD = 0.85 
-# Frames para capturar para uma predição
-SEQUENCE_LENGTH = 30 
-# Frames que a mão deve estar parada antes de iniciar a captura
-FRAMES_TO_BE_STABLE = 10 
+# --- PARÂMETROS DE USABILIDADE (AJUSTE CONFORME NECESSÁRIO) ---
+CONFIDENCE_THRESHOLD = 0.70
+FRAMES_TO_CONFIRM = 10
+SEQUENCE_LENGTH = 30
+
+# --- CORES PARA VISUALIZAÇÃO ---
+COR_TEXTO = (255, 255, 255)
+COR_PREDICAO_BOA = (0, 255, 0) # Verde para predições acima do limiar
 
 # --- CARREGAR MODELO E ENCODER ---
 try:
@@ -27,7 +30,7 @@ except Exception as e:
     print(f"Erro crítico ao carregar modelo ou encoder: {e}")
     exit()
 
-# Função para normalizar landmarks (deve ser idêntica à da coleta)
+# Função para normalizar landmarks
 def calculate_normalized_landmarks_optimized(hand_landmarks):
     coords = np.array([[lm.x, lm.y] for lm in hand_landmarks.landmark])
     base_point = coords[0]
@@ -43,13 +46,11 @@ mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(min_detection_confidence=0.7, max_num_hands=1)
 cap = cv2.VideoCapture(0)
 
-# --- VARIÁVEIS DE ESTADO PARA A LÓGICA DE GATILHO ---
-# Estados: 'WAITING', 'STABILIZING', 'CAPTURING', 'PREDICTING'
-current_state = 'WAITING'
-sequence_data = []
+# --- VARIÁVEIS PARA LÓGICA CONTÍNUA ---
+sequence = deque(maxlen=SEQUENCE_LENGTH)
 sentence = []
-last_prediction = ""
-stable_counter = 0
+last_stable_prediction = ""
+prediction_buffer = deque(maxlen=FRAMES_TO_CONFIRM)
 
 while cap.isOpened():
     success, image = cap.read()
@@ -59,74 +60,60 @@ while cap.isOpened():
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = hands.process(image_rgb)
     display_image = image.copy()
+    
+    current_prediction_label = ""
+    current_confidence = 0.0
 
     if results.multi_hand_landmarks:
         hand_landmarks = results.multi_hand_landmarks[0]
         mp_drawing.draw_landmarks(display_image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
         
-        # --- MÁQUINA DE ESTADOS ---
-        if current_state == 'WAITING':
-            current_state = 'STABILIZING'
-            stable_counter = 0
+        landmarks = calculate_normalized_landmarks_optimized(hand_landmarks)
+        sequence.append(landmarks)
 
-        elif current_state == 'STABILIZING':
-            cv2.putText(display_image, "Estabilizando...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-            stable_counter += 1
-            if stable_counter >= FRAMES_TO_BE_STABLE:
-                current_state = 'CAPTURING'
-                sequence_data = []
-                print("Mão estabilizada. Iniciando captura...")
-
-        elif current_state == 'CAPTURING':
-            cv2.putText(display_image, f"Gravando... {len(sequence_data)}/{SEQUENCE_LENGTH}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            landmarks = calculate_normalized_landmarks_optimized(hand_landmarks)
-            if not np.all(landmarks == 0):
-                sequence_data.append(landmarks)
-            
-            if len(sequence_data) == SEQUENCE_LENGTH:
-                current_state = 'PREDICTING'
-
-        elif current_state == 'PREDICTING':
-            print("Captura completa. Realizando predição...")
-            input_data = np.expand_dims(sequence_data, axis=0)
+        if len(sequence) == SEQUENCE_LENGTH:
+            input_data = np.expand_dims(list(sequence), axis=0)
             prediction = model.predict(input_data, verbose=0)[0]
             
-            confidence = np.max(prediction)
+            current_confidence = np.max(prediction)
             predicted_index = np.argmax(prediction)
-            predicted_label = CLASSES[predicted_index]
             
-            # Verifica se a predição é confiável e não é a classe 'fundo'
-            if confidence >= CONFIDENCE_THRESHOLD and predicted_label != 'fundo':
-                last_prediction = f"{predicted_label} ({confidence:.2f})"
-                if not sentence or sentence[-1] != predicted_label:
-                    sentence.append(predicted_label)
+            if current_confidence >= CONFIDENCE_THRESHOLD:
+                current_prediction_label = CLASSES[predicted_index]
+                prediction_buffer.append(current_prediction_label)
+
+                if len(prediction_buffer) == FRAMES_TO_CONFIRM and len(set(prediction_buffer)) == 1:
+                    if current_prediction_label != last_stable_prediction and current_prediction_label != 'fundo':
+                        sentence.append(current_prediction_label)
+                        last_stable_prediction = current_prediction_label
             else:
-                last_prediction = f"Incerto ou Fundo ({confidence:.2f})"
-            
-            print(f"Predição: {last_prediction}")
-            current_state = 'WAITING' # Reseta para o início do ciclo
+                prediction_buffer.clear()
+    else:
+        prediction_buffer.clear()
 
-    else: # Se a mão não for detectada
-        if current_state != 'WAITING':
-            print("Mão perdida. Resetando estado.")
-        current_state = 'WAITING'
-        stable_counter = 0
-        sequence_data = []
+    # --- LÓGICA DE VISUALIZAÇÃO NA TELA ---
+    if current_confidence >= CONFIDENCE_THRESHOLD:
+        text = f"{current_prediction_label} ({current_confidence:.2f})"
+        cv2.putText(display_image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, COR_PREDICAO_BOA, 2)
 
-    # --- EXIBIÇÃO NA TELA ---
-    # Mostra a última predição válida
-    if last_prediction:
-        cv2.putText(display_image, last_prediction, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-    # Mostra a sentença formada
     cv2.rectangle(display_image, (10, 400), (630, 470), (0, 0, 0), -1)
-    cv2.putText(display_image, ' '.join(sentence), (20, 450), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+    cv2.putText(display_image, ' '.join(sentence), (20, 450), cv2.FONT_HERSHEY_SIMPLEX, 2, COR_TEXTO, 3)
 
-    cv2.imshow('Reconhecimento de Libras', display_image)
+    cv2.imshow('Reconhecimento Contínuo de Libras', display_image)
     
+    # --- GERENCIAMENTO DE TECLAS ---
     key = cv2.waitKey(5) & 0xFF
-    if key == 27: break # ESC para sair
-    if key == 32: sentence = [] # ESPAÇO para limpar
-
+    if key == 27: # Tecla ESC para sair
+        break
+    elif key == 8: # Tecla BACKSPACE para apagar a última letra
+        if sentence:
+            sentence.pop()
+        # Reseta a última predição estável para permitir que a mesma letra seja adicionada novamente
+        last_stable_prediction = "" 
+            
+    elif key == 32: # Tecla ESPAÇO para limpar a frase inteira
+        sentence = []
+        last_stable_prediction = ""
+            
 cap.release()
 cv2.destroyAllWindows()
