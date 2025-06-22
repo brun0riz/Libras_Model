@@ -5,20 +5,19 @@ import pickle
 import numpy as np
 from collections import deque
 
-# --- PARÂMETROS E CONFIGURAÇÕES ---
-MODEL_PATH = 'libras_model_lstm_final.h5'
+MODEL_PATH = 'modelo_final_libras.h5'
 ENCODER_PATH = 'label_encoder.pkl'
 
-# --- PARÂMETROS DE USABILIDADE (AJUSTE CONFORME NECESSÁRIO) ---
-CONFIDENCE_THRESHOLD = 0.70
+# parametros 
+CONFIDENCE_THRESHOLD = 0.7
 FRAMES_TO_CONFIRM = 10
 SEQUENCE_LENGTH = 30
 
-# --- CORES PARA VISUALIZAÇÃO ---
+# Cores para exibição
 COR_TEXTO = (255, 255, 255)
 COR_PREDICAO_BOA = (0, 255, 0) # Verde para predições acima do limiar
 
-# --- CARREGAR MODELO E ENCODER ---
+
 try:
     model = load_model(MODEL_PATH)
     with open(ENCODER_PATH, 'rb') as f:
@@ -40,13 +39,11 @@ def calculate_normalized_landmarks_optimized(hand_landmarks):
     normalized_coords = relative_coords / max_dist
     return normalized_coords.flatten()
 
-# --- INICIALIZAÇÃO MEDIAPIPE E OPENCV ---
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 hands = mp_hands.Hands(min_detection_confidence=0.7, max_num_hands=1)
 cap = cv2.VideoCapture(0)
 
-# --- VARIÁVEIS PARA LÓGICA CONTÍNUA ---
 sequence = deque(maxlen=SEQUENCE_LENGTH)
 sentence = []
 last_stable_prediction = ""
@@ -91,7 +88,6 @@ while cap.isOpened():
     else:
         prediction_buffer.clear()
 
-    # --- LÓGICA DE VISUALIZAÇÃO NA TELA ---
     if current_confidence >= CONFIDENCE_THRESHOLD:
         text = f"{current_prediction_label} ({current_confidence:.2f})"
         cv2.putText(display_image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, COR_PREDICAO_BOA, 2)
@@ -101,7 +97,6 @@ while cap.isOpened():
 
     cv2.imshow('Reconhecimento Contínuo de Libras', display_image)
     
-    # --- GERENCIAMENTO DE TECLAS ---
     key = cv2.waitKey(5) & 0xFF
     if key == 27: # Tecla ESC para sair
         break

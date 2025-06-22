@@ -2,7 +2,7 @@
 import tensorflow as tf
 from tensorflow import keras
 
-MODEL_NAME = 'libras_model_lstm_cv_tuned.h5'
+MODEL_NAME = 'modelo_final_libras.h5'
 print(f"Carregando o modelo '{MODEL_NAME}'...")
 
 try:

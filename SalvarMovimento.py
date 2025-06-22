@@ -3,13 +3,13 @@ import mediapipe as mp
 import numpy as np
 import os
 
-# --- PARÂMETROS ---
-# Caminho para a pasta onde os dados serão salvos
+# pasta de letras
 DATA_PATH = "Libras_Data"
 
 # Lista para as letras/ações que serão coletadas
-# IMPORTANTE: Adicionamos a classe 'fundo' para gestos neutros ou de transição
 actions = np.array(['A', 'B', 'C','cedinha_a_cecedilha', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'fundo'])
+# cedinha_a_cecedilha é a letra 'Ç' em Libras, representada como 'cedinha_a_cecedilha'
+# fundo é a classe para movimentos aleatórios ou sem gesto específico
 
 # Dicionário para mapear teclas para ações
 key_map = {
